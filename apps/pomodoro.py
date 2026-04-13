@@ -1,12 +1,12 @@
 import sys
+import subprocess
 sys.path.insert(0, '/Users/ben/kano-sdk-python')
 
 from communitysdk import list_connected_devices, RetailPixelKitSerial as PixelKit
 from time import sleep, time
 
-PRESETS = [5, 10, 15, 25, 30]
-preset_index = 2
-total_seconds = PRESETS[preset_index] * 60
+minutes = 15
+total_seconds = minutes * 60
 seconds_left = total_seconds
 running = False
 last_tick = None
@@ -24,7 +24,12 @@ DIGITS = {
     '9': [1,1,1, 1,0,1, 1,1,1, 0,0,1, 1,1,1],
 }
 
-def get_color(seconds_left, total):
+def play_sound(name):
+    subprocess.Popen(['afplay', '/System/Library/Sounds/{}.aiff'.format(name)])
+
+def get_color(seconds_left, total, is_running):
+    if not is_running:
+        return '#ff8800'
     ratio = seconds_left / total
     if ratio > 0.5:
         return '#00ff00'
@@ -43,7 +48,7 @@ def draw_digit(frame, digit, col_offset, color):
 
 def build_frame(seconds_left, total_seconds, is_running):
     frame = ['#000000'] * 128
-    color = get_color(seconds_left, total_seconds)
+    color = get_color(seconds_left, total_seconds, is_running)
     mins = seconds_left // 60
     secs = seconds_left % 60
     draw_digit(frame, str(mins // 10), 0, color)
@@ -55,17 +60,22 @@ def build_frame(seconds_left, total_seconds, is_running):
     progress = int((seconds_left / total_seconds) * 16)
     for i in range(progress):
         frame[7 * 16 + i] = color
-    if not is_running:
-        frame = ['#222222' if c != '#000000' else '#000000' for c in frame]
-        frame[0] = '#ffffff'
     return frame
 
 def flash_done(pk):
+    play_sound('Hero')
     for _ in range(6):
         pk.stream_frame(['#ffffff'] * 128)
         sleep(0.2)
         pk.stream_frame(['#000000'] * 128)
         sleep(0.2)
+
+def change_minutes(direction):
+    global minutes, total_seconds, seconds_left
+    step = 1 if minutes < 10 else 5
+    minutes = max(1, min(60, minutes + direction * step))
+    total_seconds = minutes * 60
+    seconds_left = total_seconds
 
 devices = list_connected_devices()
 pk = next(filter(lambda d: isinstance(d, PixelKit), devices), None)
@@ -74,32 +84,29 @@ if pk is None:
     print('No Pixel Kit found :(')
     sys.exit()
 
-print('Connected! btn-A: Start/Pause | btn-B: Reset | js-up/down: change preset')
-print('Current preset: {} min'.format(PRESETS[preset_index]))
+print('Connected! btn-A: Start/Pause | btn-B: Reset | js-up/down: change duration')
+print('Current: {} min'.format(minutes))
 
 def on_button_down(button_id):
-    global running, last_tick, seconds_left, total_seconds, preset_index
+    global running, last_tick, seconds_left, total_seconds, minutes
     if button_id == 'btn-A':
         running = not running
         if running:
             last_tick = time()
+            play_sound('Ping')
             print('Started!')
         else:
             print('Paused.')
     elif button_id == 'btn-B':
         running = False
         seconds_left = total_seconds
-        print('Reset to {} min'.format(PRESETS[preset_index]))
+        print('Reset to {} min'.format(minutes))
     elif button_id == 'js-up' and not running:
-        preset_index = min(preset_index + 1, len(PRESETS) - 1)
-        total_seconds = PRESETS[preset_index] * 60
-        seconds_left = total_seconds
-        print('Preset: {} min'.format(PRESETS[preset_index]))
+        change_minutes(+1)
+        print('Duration: {} min'.format(minutes))
     elif button_id == 'js-down' and not running:
-        preset_index = max(preset_index - 1, 0)
-        total_seconds = PRESETS[preset_index] * 60
-        seconds_left = total_seconds
-        print('Preset: {} min'.format(PRESETS[preset_index]))
+        change_minutes(-1)
+        print('Duration: {} min'.format(minutes))
 
 pk.on_button_down = on_button_down
 
