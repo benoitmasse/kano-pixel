@@ -31,35 +31,47 @@ def px(frame, row, col, color):
         frame[row * 16 + col] = color
 
 # ─── Sun ───────────────────────────────────────────────────────────────────
-# Static body, rays rotate clockwise around it.
+# Dots shoot out from the sun body in 8 directions and fade as they travel.
+# Each stream is a list of (row, col) pixels ordered outward from the body.
 
-SUN_RAYS = [
-    [(0, 7), (0, 8)],       # 12 o'clock
-    [(1, 11)],              # 1:30
-    [(3, 12), (4, 12)],     # 3 o'clock
-    [(6, 11)],              # 4:30
-    [(7, 7), (7, 8)],       # 6 o'clock
-    [(6, 4)],               # 7:30
-    [(3, 3), (4, 3)],       # 9 o'clock
-    [(1, 4)],               # 10:30
+SUN_STREAMS = [
+    [(1, 7),  (0, 7)],           # up
+    [(1, 10), (0, 11)],          # up-right
+    [(3, 11), (3, 12), (3, 13)], # right
+    [(6, 10), (7, 11)],          # down-right
+    [(6, 7),  (7, 7)],           # down
+    [(6, 5),  (7, 4)],           # down-left
+    [(3, 4),  (3, 3),  (3, 2)],  # left
+    [(1, 5),  (0, 4)],           # up-left
 ]
-RAY_COLORS = ['#ff9900', '#dd6600', '#993300', '#441100',
-              '#220800', '#220800', '#441100', '#993300']
+
+# Dot colors: leading (just left body) → fading to black
+RAY_DOT  = ['#ffcc00', '#ff8800', '#cc4400', '#551100']
+RAY_GAP  = 5   # blank frames between pulses
+RAY_STEP = 2   # ticks per position advance (controls speed)
 
 def animate_sun(tick):
     frame = ['#111100'] * 128
     Y = '#ffee00'
+    # Sun body
     for r in range(2, 6):
         for c in range(6, 10):
             px(frame, r, c, Y)
     for c in range(5, 11):
         px(frame, 3, c, Y)
         px(frame, 4, c, Y)
-    active = (tick // 2) % 8
-    for i, ray_pixels in enumerate(SUN_RAYS):
-        dist = min((i - active) % 8, (active - i) % 8)
-        for r, c in ray_pixels:
-            px(frame, r, c, RAY_COLORS[dist])
+
+    # Animate each stream: a dot travels outward and fades
+    max_len = max(len(s) for s in SUN_STREAMS)
+    period = max_len + RAY_GAP   # total cycle length per stream
+    pulse = (tick // RAY_STEP) % period  # current position of leading dot
+
+    for stream in SUN_STREAMS:
+        for j, (r, c) in enumerate(stream):
+            # age = how many steps behind the leading dot this pixel is
+            age = pulse - j
+            if 0 <= age < len(RAY_DOT):
+                px(frame, r, c, RAY_DOT[age])
     return frame
 
 # ─── Clouds ────────────────────────────────────────────────────────────────
@@ -182,30 +194,37 @@ ANIMATIONS = {
     'fog':    animate_fog,
 }
 
-# ─── Temperature frame ─────────────────────────────────────────────────────
+# ─── Temperature overlay ───────────────────────────────────────────────────
+# Draws temp digits directly on top of an existing animation frame.
+# Only "on" pixels are painted (white), so the animation shows through.
 
-def temp_color(temp_c):
-    if temp_c < 0:  return '#0088ff'
-    if temp_c < 10: return '#00ccee'
-    if temp_c < 21: return '#00ee44'
-    if temp_c < 30: return '#ffaa00'
-    return '#ff3300'
-
-def make_temp_frame(temp_c):
-    frame = ['#000000'] * 128
-    color = temp_color(temp_c)
+def overlay_temp(frame, temp_c):
     val = int(round(temp_c))
     chars = (['-'] + list(str(abs(val)))) if val < 0 else list(str(val))
     total_width = len(chars) * 4 - 1
-    col_start = (16 - total_width) // 2
+    col_start = 15 - total_width   # right-aligned
+    row_start = 3                  # bottom half of display
+
+    # Collect lit pixel positions
+    lit = set()
     for i, ch in enumerate(chars):
         pixels = DIGITS[ch]
         for r in range(5):
             for c in range(3):
                 if pixels[r * 3 + c]:
-                    px(frame, 1 + r, col_start + i * 4 + c, color)
-    px(frame, 0, 15, color)  # °C dot
-    return frame
+                    lit.add((row_start + r, col_start + i * 4 + c))
+    lit.add((row_start, col_start + total_width + 1))  # ° dot
+
+    # Dark outline around each lit pixel so text reads on any background
+    for r, c in lit:
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = r + dr, c + dc
+            if (nr, nc) not in lit:
+                px(frame, nr, nc, '#000000')
+
+    # White digits on top
+    for r, c in lit:
+        px(frame, r, c, '#ffffff')
 
 # ─── Weather fetch ─────────────────────────────────────────────────────────
 
@@ -245,38 +264,24 @@ if pk is None:
 print('Connected! Fetching Montreal weather...')
 temp_c, code = fetch_weather()
 wtype = weather_type(code) if code is not None else 'cloudy'
-preview_index = WEATHER_TYPES.index(wtype)
 print('Weather: {} | {}°C'.format(wtype, round(temp_c) if temp_c else '?'))
-print('js-up/down: cycle animations | btn-A: toggle temp | btn-B: refresh')
+print('btn-B: show current weather illustration')
 
-mode = 'weather'
 last_fetch = time()
 tick = 0
+anim_start = 0  # tick when current animation started (resets on switch)
 
 def on_button_down(button_id):
-    global mode, temp_c, code, wtype, preview_index, last_fetch
-    if button_id == 'btn-A':
-        mode = 'temp' if mode == 'weather' else 'weather'
-        print('Mode:', mode)
-    elif button_id == 'btn-B':
-        print('Refreshing weather...')
+    global temp_c, code, wtype, preview_index, last_fetch, anim_start
+    if button_id == 'btn-B':
         new_temp, new_code = fetch_weather()
         if new_temp is not None:
             temp_c, code = new_temp, new_code
-            wtype = weather_type(code)
-            preview_index = WEATHER_TYPES.index(wtype)
             last_fetch = time()
-            print('Updated: {} | {}°C'.format(wtype, round(temp_c)))
-    elif button_id == 'js-up':
-        preview_index = (preview_index - 1) % len(WEATHER_TYPES)
-        wtype = WEATHER_TYPES[preview_index]
-        mode = 'weather'
-        print('Preview:', wtype)
-    elif button_id == 'js-down':
-        preview_index = (preview_index + 1) % len(WEATHER_TYPES)
-        wtype = WEATHER_TYPES[preview_index]
-        mode = 'weather'
-        print('Preview:', wtype)
+        wtype = weather_type(code) if code is not None else 'cloudy'
+        preview_index = WEATHER_TYPES.index(wtype)
+        anim_start = tick
+        print('Weather: {} | {}°C'.format(wtype, round(temp_c) if temp_c else '?'))
 
 pk.on_button_down = on_button_down
 
@@ -291,10 +296,9 @@ try:
                 print('Auto-refresh: {} | {}°C'.format(wtype, round(temp_c)))
             last_fetch = time()
 
-        if mode == 'weather':
-            frame = ANIMATIONS[wtype](tick)
-        else:
-            frame = make_temp_frame(temp_c) if temp_c is not None else ['#000000'] * 128
+        frame = ANIMATIONS[wtype](tick - anim_start)
+        if temp_c is not None:
+            overlay_temp(frame, temp_c)
 
         pk.stream_frame(frame)
         tick += 1
